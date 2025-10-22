@@ -239,9 +239,8 @@ def looks_like_trap_url(u: str) -> bool:
 		return True
 
 
-# -----------------------------
+
 # Persistence
-# -----------------------------
 
 def _sha1(s: str) -> str:
 	return hashlib.sha1(s.encode("utf-8")).hexdigest()
@@ -292,9 +291,8 @@ def persist_meta(
 		pass
 
 
-# -----------------------------
+
 # Domain health (soft circuit breaker)
-# -----------------------------
 
 _domain_bad_counts: Dict[str, int] = {}
 
