@@ -5,6 +5,7 @@ import hashlib
 from datetime import datetime, timezone
 from urllib.parse import urlparse, urlunparse, urljoin, parse_qs
 from typing import List, Dict, Optional
+from collections import Counter, defaultdict
 
 try:
     from bs4 import BeautifulSoup
@@ -32,9 +33,15 @@ DATA_DIR = os.path.join("data")
 PAGES_DIR = os.path.join(DATA_DIR, "pages")
 META_DIR = os.path.join(DATA_DIR, "meta")
 META_INDEX = os.path.join(META_DIR, "index.jsonl")
+REPORT_DIR = os.path.join(DATA_DIR, "report")
+REPORT_FILE = os.path.join(REPORT_DIR, "report.txt")
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+STOPWORDS_JSON = os.path.join(ROOT_DIR, "resources", "stopwords.json")
+STOPWORDS_NOTICE = ""
 
 os.makedirs(PAGES_DIR, exist_ok=True)
 os.makedirs(META_DIR, exist_ok=True)
+os.makedirs(REPORT_DIR, exist_ok=True)
 
 
 
@@ -324,3 +331,99 @@ def domain_is_downgraded(url: str) -> bool:
 		return False
 	return _domain_bad_counts.get(dom, 0) >= DOMAIN_DOWNGRADE_THRESHOLD
 
+
+
+
+# Stats collection and report writer
+def _load_stopwords() -> set:
+	"""Load stopwords solely from resources/stopwords.json.
+	If the file is missing or unreadable, return an empty set (no built-in fallback).
+	"""
+	global STOPWORDS_NOTICE
+	
+	try:
+		with open(STOPWORDS_JSON, 'r', encoding='utf-8') as f:
+			data = json.load(f)
+		# Normalize to lowercase strings, strip spaces
+		STOPWORDS_NOTICE = "Stopwords loaded from resources/stopwords.json"
+		return {str(w).strip().lower() for w in data if str(w).strip()}
+	except Exception:
+		# Unified via JSON only: no internal minimal fallback
+		STOPWORDS_NOTICE = "Stopwords JSON not found or unreadable; using empty set"
+		return set()
+
+STOPWORDS = _load_stopwords()
+
+
+class StatsCollector:
+	seen_urls: set = set()  # defragmented URLs
+	total_unique: int = 0
+	longest_page: tuple = (0, None)  # (word_count, url)
+	global_freq: Counter = Counter()
+	subdomain_counts: Dict[str, int] = defaultdict(int)
+
+	@classmethod
+	def record_page(cls, url: str, words: List[str]):
+		"""Record stats for a newly seen page (defragmented URL uniqueness).
+		words should be tokenized words for the page (including stopwords for length).
+		"""
+		key = defragment(url)
+		if key in cls.seen_urls:
+			return
+		cls.seen_urls.add(key)
+		cls.total_unique += 1
+
+		# longest page by total words (do not remove stopwords for this metric)
+		wc = len(words)
+		if wc > cls.longest_page[0]:
+			cls.longest_page = (wc, key)
+
+		# global frequency excluding stopwords
+		filtered = [w for w in words if w not in STOPWORDS]
+		if filtered:
+			cls.global_freq.update(filtered)
+
+		# subdomain counts under uci.edu
+		host = (urlparse(key).hostname or "").lower()
+		if host.endswith(".uci.edu") or host == "uci.edu":
+			cls.subdomain_counts[host] += 1
+
+		# write report synchronously after each new unique page
+		try:
+			cls.write_report()
+		except Exception:
+			pass
+
+	@classmethod
+	def snapshot(cls) -> Dict:
+		top50 = cls.global_freq.most_common(50)
+		subdomains = sorted(cls.subdomain_counts.items(), key=lambda x: x[0])
+		return {
+			"unique_pages": cls.total_unique,
+			"longest_page": {"url": cls.longest_page[1], "words": cls.longest_page[0]},
+			"top50": top50,
+			"subdomains": subdomains,
+		}
+
+	@classmethod
+	def write_report(cls):
+		snap = cls.snapshot()
+		lines = []
+		# First line notice about stopwords source
+		lines.append(STOPWORDS_NOTICE)
+		lines.append("")
+		lines.append("Unique pages: {}".format(snap["unique_pages"]))
+		lp = snap["longest_page"]
+		lines.append("Longest page: {} ({} words)".format(lp["url"] or "", lp["words"]))
+		lines.append("")
+		lines.append("Top 50 words (excluding stopwords):")
+		for w, c in snap["top50"]:
+			lines.append(f"{w}, {c}")
+		lines.append("")
+		lines.append("uci.edu subdomains (alphabetical), unique page counts:")
+		for host, cnt in snap["subdomains"]:
+			lines.append(f"{host}, {cnt}")
+
+		os.makedirs(REPORT_DIR, exist_ok=True)
+		with open(REPORT_FILE, "w", encoding="utf-8") as f:
+			f.write("\n".join(lines) + "\n")

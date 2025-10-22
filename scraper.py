@@ -14,6 +14,7 @@ from utilities import (
     persist_meta,
     update_domain_health,
     domain_is_downgraded,
+    StatsCollector,
     MIN_WORDS,
     MIN_TEXT_RATIO,
     MAX_BYTES_HEADER,
@@ -81,6 +82,12 @@ def extract_next_links(url, resp):
     word_count = len(words)
     text_ratio = (len(text) / max(1, len(content)))
     low_info = (word_count < MIN_WORDS) or (text_ratio < MIN_TEXT_RATIO)
+
+    # Record stats and write report (unique counting by defragmented URL)
+    try:
+        StatsCollector.record_page(url, words)
+    except Exception:
+        pass
 
     # Save content only when small and informative HTML
     bytes_saved = 0
