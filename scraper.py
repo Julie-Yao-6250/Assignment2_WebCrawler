@@ -1,9 +1,31 @@
 import re
 from urllib.parse import urlparse
 
+from utilities import (
+    utcnow_iso,
+    safe_int,
+    is_html,
+    extract_visible_text,
+    tokenize_words,
+    extract_links,
+    normalize_and_defragment_all,
+    looks_like_trap_url,
+    save_page_content,
+    persist_meta,
+    update_domain_health,
+    domain_is_downgraded,
+    MIN_WORDS,
+    MIN_TEXT_RATIO,
+    MAX_BYTES_HEADER,
+    MAX_BYTES_BODY,
+    SAVE_BYTES_CAP,
+)
+
+
 def scraper(url, resp):
     links = extract_next_links(url, resp)
     return [link for link in links if is_valid(link)]
+
 
 def extract_next_links(url, resp):
     # Implementation required.
@@ -15,7 +37,93 @@ def extract_next_links(url, resp):
     #         resp.raw_response.url: the url, again
     #         resp.raw_response.content: the content of the page!
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
-    return list()
+
+    # ---- from here, we implement the main page pipeline while preserving the comments above ----
+    now = utcnow_iso()
+    breakers = []
+
+    # Health checks and size-based circuit breakers
+    if resp is None or getattr(resp, "status", None) != 200 or getattr(resp, "raw_response", None) is None:
+        persist_meta(url, now, resp, breakers + ["bad_status_or_no_response"], links_out=0)
+        return []
+
+    rr = resp.raw_response
+    headers = getattr(rr, "headers", {}) or {}
+    ctype = headers.get("Content-Type")
+    clen = safe_int(headers.get("Content-Length"))
+
+    if not is_html(ctype or ""):
+        persist_meta(url, now, resp, breakers + ["non_html"], links_out=0)
+        return []
+
+    if clen and clen > MAX_BYTES_HEADER:
+        persist_meta(url, now, resp, breakers + ["too_large_header"], links_out=0)
+        return []
+
+    content = getattr(rr, "content", b"") or b""
+    if len(content) == 0:
+        persist_meta(url, now, resp, breakers + ["empty_200"], links_out=0)
+        return []
+
+    if len(content) > MAX_BYTES_BODY:
+        persist_meta(url, now, resp, breakers + ["too_large_body"], links_out=0)
+        return []
+
+    # Trap detection on current URL
+    if looks_like_trap_url(url):
+        persist_meta(url, now, resp, breakers + ["trap_url"], links_out=0)
+        return []
+
+    # Visible text extraction and info value evaluation
+    text = extract_visible_text(content, getattr(rr, "encoding", None))
+    words = tokenize_words(text)
+    word_count = len(words)
+    text_ratio = (len(text) / max(1, len(content)))
+    low_info = (word_count < MIN_WORDS) or (text_ratio < MIN_TEXT_RATIO)
+
+    # Save content only when small and informative HTML
+    bytes_saved = 0
+    if not low_info and len(content) <= SAVE_BYTES_CAP:
+        bytes_saved = save_page_content(url, content)
+
+    # Extract links and normalize (no is_valid here; only trap and dedupe)
+    raw_links = extract_links(content)
+    candidates = normalize_and_defragment_all(raw_links, base=url)
+
+    seen = set()
+    out_links = []
+    for u in candidates:
+        if u in seen:
+            continue
+        seen.add(u)
+        if looks_like_trap_url(u):
+            continue
+        out_links.append(u)
+
+    # Suppress expansions on low-info pages or downgraded domains
+    if low_info or domain_is_downgraded(url):
+        if low_info:
+            breakers.append("low_info")
+        else:
+            breakers.append("domain_downgraded")
+        links_to_return = []
+    else:
+        links_to_return = out_links
+
+    # Persist metadata and update domain health
+    persist_meta(
+        url=url,
+        ts=now,
+        resp=resp,
+        breakers=breakers,
+        links_out=len(links_to_return),
+        word_count=word_count,
+        text_ratio=text_ratio,
+        bytes_saved=bytes_saved,
+    )
+    update_domain_health(url, breakers)
+
+    return links_to_return
 
 def is_valid(url):
     # Decide whether to crawl this url or not. 
