@@ -52,25 +52,26 @@ def extract_next_links(url, resp):
     ctype = headers.get("Content-Type")
     clen = safe_int(headers.get("Content-Length"))
 
+    # Temporary filter
     if not is_html(ctype or ""):
         persist_meta(url, now, resp, breakers + ["non_html"], links_out=0)
         return []
 
-    if clen and clen > MAX_BYTES_HEADER:
+    if clen and clen > MAX_BYTES_HEADER:  # Filter out header over 48KB
         persist_meta(url, now, resp, breakers + ["too_large_header"], links_out=0)
         return []
 
     content = getattr(rr, "content", b"") or b""
-    if len(content) == 0:
+    if len(content) == 0:                 # Filter out empty web
         persist_meta(url, now, resp, breakers + ["empty_200"], links_out=0)
         return []
 
-    if len(content) > MAX_BYTES_BODY:
+    if len(content) > MAX_BYTES_BODY:     # Filter out body over 10M
         persist_meta(url, now, resp, breakers + ["too_large_body"], links_out=0)
         return []
 
     # Trap detection on current URL
-    if looks_like_trap_url(url):
+    if looks_like_trap_url(url):          # Filter out url > 1024, query > 8, session, calandar, pagination, repeated
         persist_meta(url, now, resp, breakers + ["trap_url"], links_out=0)
         return []
 
@@ -90,6 +91,7 @@ def extract_next_links(url, resp):
     raw_links = extract_links(content)
     candidates = normalize_and_defragment_all(raw_links, base=url)
 
+    # Core: link extractor
     seen = set()
     out_links = []
     for u in candidates:
@@ -133,7 +135,18 @@ def is_valid(url):
         parsed = urlparse(url)
         if parsed.scheme not in set(["http", "https"]):
             return False
-        return not re.match(
+
+        allowed_domains = {
+            "www.ics.uci.edu",
+            "www.cs.uci.edu",
+            "www.informatics.uci.edu",
+            "www.stat.uci.edu"
+        }
+
+        if parsed.netloc.lower() not in allowed_domains:
+            return False
+
+        if re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
             + r"|png|tiff?|mid|mp2|mp3|mp4"
             + r"|wav|avi|mov|mpeg|ram|m4v|mkv|ogg|ogv|pdf"
@@ -141,7 +154,11 @@ def is_valid(url):
             + r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
             + r"|epub|dll|cnf|tgz|sha1"
             + r"|thmx|mso|arff|rtf|jar|csv"
-            + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", parsed.path.lower())
+            + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$",
+            parsed.path.lower()):
+            return False
+
+        return True
 
     except TypeError:
         print ("TypeError for ", parsed)

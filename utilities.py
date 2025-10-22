@@ -14,14 +14,14 @@ except Exception:  # Fallback if bs4 is missing; scraper will still skip non-HTM
 
 # Configuration thresholds
 
-MAX_BYTES_HEADER = 5000000                # If Content-Length header exceeds 5M, skip
+MAX_BYTES_HEADER = 50000                  # If Content-Length header exceeds 5M, skip
 MAX_BYTES_BODY = 10000000                 # If actual body exceeds 10M, skip
 SAVE_BYTES_CAP = 6000000                  # Save content only if smaller than 6M
 
 MIN_WORDS = 20                            # Consider pages with fewer words as low-info
 MIN_TEXT_RATIO = 0.02                     # Visible text length / html bytes
 
-URL_MAX_LEN = 2048
+URL_MAX_LEN = 1024
 MAX_QUERY_PARAMS = 8
 PAGINATION_MAX = 5000
 REPEAT_SEGMENTS_MAX = 3
@@ -256,10 +256,10 @@ def save_page_content(url: str, content: bytes) -> int:
 	except Exception:
 		return 0
 
-
+# Test log
 def persist_meta(
 	url: str,
-	ts: str,  # Typescript compatibility
+	ts: str,     # Timestamp utc ISO
 	resp,
 	breakers: List[str],
 	links_out: int,
