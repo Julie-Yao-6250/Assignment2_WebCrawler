@@ -4,6 +4,8 @@ from argparse import ArgumentParser
 from utils.server_registration import get_cache_server
 from utils.config import Config
 from crawler import Crawler
+from crawler.frontier_mt import PoliteFrontier
+from crawler.worker_mt import PoliteWorker
 
 
 def main(config_file, restart):
@@ -11,7 +13,11 @@ def main(config_file, restart):
     cparser.read(config_file)
     config = Config(cparser)
     config.cache_server = get_cache_server(config, restart)
-    crawler = Crawler(config, restart)
+    # Select multithread-capable frontier/worker when threads_count > 1
+    if config.threads_count > 1:
+        crawler = Crawler(config, restart, frontier_factory=PoliteFrontier, worker_factory=PoliteWorker)
+    else:
+        crawler = Crawler(config, restart)
     crawler.start()
 
 

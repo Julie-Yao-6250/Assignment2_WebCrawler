@@ -8,7 +8,8 @@ from utils.utilities import (
     persist_meta, update_domain_health, StatsCollector,
     MIN_WORDS, MIN_TEXT_RATIO, MAX_BYTES_HEADER,
     MAX_BYTES_BODY, SAVE_BYTES_CAP, looks_like_trap_url,
-    domain_is_downgraded
+    domain_is_downgraded,
+    enqueue_page_event, start_report_merger_once
 )
 
 
@@ -68,8 +69,10 @@ def extract_next_links(url, resp):
     low_info = (word_count < MIN_WORDS) or (text_ratio < MIN_TEXT_RATIO)
 
     # Record stats and write report (unique counting by defragmented URL)
+    # Ensure merger thread is running and enqueue event instead of direct write
     try:
-        StatsCollector.record_page(url, words)
+        start_report_merger_once()
+        enqueue_page_event(url, words)
     except Exception:
         pass
 
