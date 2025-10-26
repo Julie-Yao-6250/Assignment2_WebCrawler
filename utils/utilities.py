@@ -2,13 +2,13 @@ import os
 import re
 import json
 import hashlib
+import threading
+import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse, urlunparse, urljoin, parse_qs
 from typing import List, Dict, Optional
 from collections import Counter, defaultdict
-import threading
-import time
-from queue import Queue, Empty
+ 
 
 try:
     from bs4 import BeautifulSoup
@@ -38,7 +38,6 @@ META_DIR = os.path.join(DATA_DIR, "meta")
 META_INDEX = os.path.join(META_DIR, "index.jsonl")
 REPORT_DIR = os.path.join(DATA_DIR, "report")
 REPORT_FILE = os.path.join(REPORT_DIR, "report.txt")
-BUFFER_FILE = os.path.join(REPORT_DIR, "buffering.txt")
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))          # .../Assignment2_WebCrawler/utils
 
 PROJECT_ROOT = os.path.dirname(ROOT_DIR)                        # .../Assignment2_WebCrawler
@@ -269,7 +268,12 @@ def save_page_content(url: str, content: bytes) -> int:
 	except Exception:
 		return 0
 
-# Test log
+# Meta logging state for interval calculations
+_META_LOCK = threading.Lock()
+_last_resp_time_any: Optional[float] = None
+_last_resp_time_per_domain: Dict[str, float] = {}
+
+
 def persist_meta(
 	url: str,
 	ts: str,     # Timestamp utc ISO
@@ -282,23 +286,46 @@ def persist_meta(
 	error: Optional[str] = None,
 ):
 	try:
+		now = time.time()
 		p = urlparse(url)
-		meta = {
-			"url": defragment(url),
-			"ts": ts,
-			"status": getattr(resp, "status", None),
-			"content_type": getattr(getattr(resp, "raw_response", None), "headers", {}).get("Content-Type") if getattr(resp, "raw_response", None) else None,
-			"content_length": getattr(getattr(resp, "raw_response", None), "headers", {}).get("Content-Length") if getattr(resp, "raw_response", None) else None,
-			"bytes_saved": bytes_saved,
-			"word_count": word_count,
-			"text_ratio": text_ratio,
-			"domain": p.hostname,
-			"breakers": breakers or [],
-			"links_out": links_out,
-			"error": error,
-		}
-		with open(META_INDEX, "a", encoding="utf-8") as f:
-			f.write(json.dumps(meta, ensure_ascii=False) + "\n")
+		domain = p.hostname
+
+		# compute intervals under a lock to avoid races across threads
+		with _META_LOCK:
+			global _last_resp_time_any
+			global _last_resp_time_per_domain
+
+			delta_prev_global_ms = None
+			if _last_resp_time_any is not None:
+				delta_prev_global_ms = int((now - _last_resp_time_any) * 1000)
+			_last_resp_time_any = now
+
+			delta_prev_domain_ms = None
+			if domain:
+				last_dom = _last_resp_time_per_domain.get(domain)
+				if last_dom is not None:
+					delta_prev_domain_ms = int((now - last_dom) * 1000)
+				_last_resp_time_per_domain[domain] = now
+
+			meta = {
+				"url": defragment(url),
+				"ts": ts,
+				"status": getattr(resp, "status", None),
+				"content_type": getattr(getattr(resp, "raw_response", None), "headers", {}).get("Content-Type") if getattr(resp, "raw_response", None) else None,
+				"content_length": getattr(getattr(resp, "raw_response", None), "headers", {}).get("Content-Length") if getattr(resp, "raw_response", None) else None,
+				"bytes_saved": bytes_saved,
+				"word_count": word_count,
+				"text_ratio": text_ratio,
+				"domain": domain,
+				"breakers": breakers or [],
+				"links_out": links_out,
+				"error": error,
+				"delta_prev_global_ms": delta_prev_global_ms,
+				"delta_prev_domain_ms": delta_prev_domain_ms,
+			}
+
+			with open(META_INDEX, "a", encoding="utf-8") as f:
+				f.write(json.dumps(meta, ensure_ascii=False) + "\n")
 	except Exception:
 		# Fail silently on telemetry
 		pass
@@ -362,6 +389,8 @@ STOPWORDS = _load_stopwords()
 
 
 class StatsCollector:
+	# Re-entrant lock to serialize updates and report writes across threads
+	_lock = threading.RLock()
 	seen_urls: set = set()  # defragmented URLs
 	total_unique: int = 0
 	longest_page: tuple = (0, None)  # (word_count, url)
@@ -373,159 +402,68 @@ class StatsCollector:
 		"""Record stats for a newly seen page (defragmented URL uniqueness).
 		words should be tokenized words for the page (including stopwords for length).
 		"""
-		key = defragment(url)
-		if key in cls.seen_urls:
-			return
-		cls.seen_urls.add(key)
-		cls.total_unique += 1
+		with cls._lock:
+			key = defragment(url)
+			if key in cls.seen_urls:
+				return
+			cls.seen_urls.add(key)
+			cls.total_unique += 1
 
-		# longest page by total words (do not remove stopwords for this metric)
-		wc = len(words)
-		if wc > cls.longest_page[0]:
-			cls.longest_page = (wc, key)
+			# longest page by total words (do not remove stopwords for this metric)
+			wc = len(words)
+			if wc > cls.longest_page[0]:
+				cls.longest_page = (wc, key)
 
-		# global frequency excluding stopwords
-		filtered = [w for w in words if w not in STOPWORDS]
-		if filtered:
-			cls.global_freq.update(filtered)
+			# global frequency excluding stopwords
+			filtered = [w for w in words if w not in STOPWORDS]
+			if filtered:
+				cls.global_freq.update(filtered)
 
-		# subdomain counts under uci.edu
-		host = (urlparse(key).hostname or "").lower()
-		if host.endswith(".uci.edu") or host == "uci.edu":
-			cls.subdomain_counts[host] += 1
+			# subdomain counts under uci.edu
+			host = (urlparse(key).hostname or "").lower()
+			if host.endswith(".uci.edu") or host == "uci.edu":
+				cls.subdomain_counts[host] += 1
 
-		# write report synchronously after each new unique page
-		try:
-			cls.write_report()
-		except Exception:
-			pass
+			# write report synchronously after each new unique page
+			try:
+				cls.write_report()
+			except Exception:
+				pass
+
 
 	@classmethod
 	def snapshot(cls) -> Dict:
-		top50 = cls.global_freq.most_common(50)
-		subdomains = sorted(cls.subdomain_counts.items(), key=lambda x: x[0])
-		return {
-			"unique_pages": cls.total_unique,
-			"longest_page": {"url": cls.longest_page[1], "words": cls.longest_page[0]},
-			"top50": top50,
-			"subdomains": subdomains,
-		}
+		with cls._lock:
+			top50 = cls.global_freq.most_common(50)
+			subdomains = sorted(cls.subdomain_counts.items(), key=lambda x: x[0])
+			return {
+				"unique_pages": cls.total_unique,
+				"longest_page": {"url": cls.longest_page[1], "words": cls.longest_page[0]},
+				"top50": top50,
+				"subdomains": subdomains,
+			}
 
 	@classmethod
 	def write_report(cls):
-		snap = cls.snapshot()
-		lines = []
-		# First line notice about stopwords source
-		lines.append(STOPWORDS_NOTICE)
-		lines.append("")
-		lines.append("Unique pages: {}".format(snap["unique_pages"]))
-		lp = snap["longest_page"]
-		lines.append("Longest page: {} ({} words)".format(lp["url"] or "", lp["words"]))
-		lines.append("")
-		lines.append("Top 50 words (excluding stopwords):")
-		for w, c in snap["top50"]:
-			lines.append(f"{w}, {c}")
-		lines.append("")
-		lines.append("uci.edu subdomains (alphabetical), unique page counts:")
-		for host, cnt in snap["subdomains"]:
-			lines.append(f"{host}, {cnt}")
+		with cls._lock:
+			snap = cls.snapshot()
+			lines = []
+			# First line notice about stopwords source
+			lines.append(STOPWORDS_NOTICE)
+			lines.append("")
+			lines.append("Unique pages: {}".format(snap["unique_pages"]))
+			lp = snap["longest_page"]
+			lines.append("Longest page: {} ({} words)".format(lp["url"] or "", lp["words"]))
+			lines.append("")
+			lines.append("Top 50 words (excluding stopwords):")
+			for w, c in snap["top50"]:
+				lines.append(f"{w}, {c}")
+			lines.append("")
+			lines.append("uci.edu subdomains (alphabetical), unique page counts:")
+			for host, cnt in snap["subdomains"]:
+				lines.append(f"{host}, {cnt}")
 
-		os.makedirs(REPORT_DIR, exist_ok=True)
-		with open(REPORT_FILE, "w", encoding="utf-8") as f:
-			f.write("\n".join(lines) + "\n")
+			os.makedirs(REPORT_DIR, exist_ok=True)
+			with open(REPORT_FILE, "w", encoding="utf-8") as f:
+				f.write("\n".join(lines) + "\n")
 
-
-# ---- Event buffering and periodic merge (single-writer model) ----
-
-# Thread-safe queue for page events to avoid per-page file I/O from workers.
-_REPORT_Q: Queue = Queue(maxsize=10000)
-_MERGER_STARTED = False
-_MERGER_LOCK = threading.Lock()
-
-
-def enqueue_page_event(url: str, words: List[str]):
-	"""Enqueue a page event to be processed by the merger thread.
-	Non-blocking put: drops event if queue is full to avoid stalling workers.
-	"""
-	try:
-		_REPORT_Q.put_nowait((url, words))
-	except Exception:
-		pass
-
-
-def _drain_events_into_stats(max_items: int = 1000):
-	"""Drain up to max_items from queue and update StatsCollector."""
-	processed = 0
-	while processed < max_items:
-		try:
-			url, words = _REPORT_Q.get_nowait()
-		except Empty:
-			break
-		# Reuse existing StatsCollector logic (not thread-safe by itself),
-		# but called only from this merger thread to keep single-writer semantics.
-		try:
-			key = defragment(url)
-			if key in StatsCollector.seen_urls:
-				continue
-			StatsCollector.seen_urls.add(key)
-			StatsCollector.total_unique += 1
-
-			wc = len(words)
-			if wc > StatsCollector.longest_page[0]:
-				StatsCollector.longest_page = (wc, key)
-
-			filtered = [w for w in words if w not in STOPWORDS]
-			if filtered:
-				StatsCollector.global_freq.update(filtered)
-
-			host = (urlparse(key).hostname or "").lower()
-			if host.endswith(".uci.edu") or host == "uci.edu":
-				StatsCollector.subdomain_counts[host] += 1
-		except Exception:
-			pass
-		finally:
-			processed += 1
-
-
-def _write_buffer_snapshot():
-	"""Write a lightweight snapshot to buffering.txt for debugging/monitoring."""
-	snap = StatsCollector.snapshot()
-	buf_lines = [
-		f"unique={snap['unique_pages']}",
-		f"longest_words={snap['longest_page']['words']}",
-		f"longest_url={snap['longest_page']['url'] or ''}",
-		f"top_first={(snap['top50'][0][0] if snap['top50'] else '')}",
-	]
-	try:
-		with open(BUFFER_FILE, "w", encoding="utf-8") as f:
-			f.write("\n".join(buf_lines) + "\n")
-	except Exception:
-		pass
-
-
-def _merge_loop(interval_sec: float = 0.1):
-	"""Background merger: every 100ms drain events, update stats, write
-	buffering.txt and report.txt. Single writer ensures atomicity when
-	combined with one-file-at-a-time writes.
-	"""
-	while True:
-		try:
-			_drain_events_into_stats()
-			# write buffering and final report
-			_write_buffer_snapshot()
-			StatsCollector.write_report()
-			time.sleep(interval_sec)
-		except Exception:
-			# Never crash the merger; tiny backoff
-			time.sleep(interval_sec)
-
-
-def start_report_merger_once():
-	"""Start the background merger exactly once."""
-	global _MERGER_STARTED
-	with _MERGER_LOCK:
-		if _MERGER_STARTED:
-			return
-		t = threading.Thread(target=_merge_loop, name="ReportMerger", daemon=True)
-		t.start()
-		_MERGER_STARTED = True
