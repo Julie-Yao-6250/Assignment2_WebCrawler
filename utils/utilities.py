@@ -39,8 +39,10 @@ META_INDEX = os.path.join(META_DIR, "index.jsonl")
 REPORT_DIR = os.path.join(DATA_DIR, "report")
 REPORT_FILE = os.path.join(REPORT_DIR, "report.txt")
 BUFFER_FILE = os.path.join(REPORT_DIR, "buffering.txt")
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-STOPWORDS_JSON = os.path.join(ROOT_DIR, "resources", "stopwords.json")
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))          # .../Assignment2_WebCrawler/utils
+
+PROJECT_ROOT = os.path.dirname(ROOT_DIR)                        # .../Assignment2_WebCrawler
+STOPWORDS_JSON = os.path.join(PROJECT_ROOT, "resources", "stopwords.json")
 STOPWORDS_NOTICE = ""
 
 os.makedirs(PAGES_DIR, exist_ok=True)

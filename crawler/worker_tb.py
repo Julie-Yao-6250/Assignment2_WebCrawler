@@ -5,14 +5,19 @@ from utils import get_logger
 import scraper
 
 
-class PoliteWorker(Thread):
-    """Worker that relies on PoliteFrontier for per-domain politeness.
-    get_tbd_url() will block until a domain is ready or no work remains.
+class TaskBoardWorker(Thread):
+    """Worker for TaskBoard push model.
+
+    The worker calls taskboard.get_task(worker_id) which blocks until a URL is assigned.
+    Upon completion, it loops and calls get_task again (which marks the worker idle),
+    so dispatcher can立即分配下一个任务。
     """
-    def __init__(self, worker_id, config, frontier):
-        self.logger = get_logger(f"Worker-{worker_id}", "Worker_MT")
+
+    def __init__(self, worker_id, config, taskboard):
+        self.logger = get_logger(f"Worker-{worker_id}", "Worker_TB")
         self.config = config
-        self.frontier = frontier
+        self.taskboard = taskboard
+        self.worker_id = worker_id
         # basic check for requests in scraper
         assert {getsource(scraper).find(req) for req in {"from requests import", "import requests"}} == {-1}, "Do not use requests in scraper.py"
         assert {getsource(scraper).find(req) for req in {"from urllib.request import", "import urllib.request"}} == {-1}, "Do not use urllib.request in scraper.py"
@@ -20,9 +25,9 @@ class PoliteWorker(Thread):
 
     def run(self):
         while True:
-            tbd_url = self.frontier.get_tbd_url()
+            tbd_url = self.taskboard.get_task(self.worker_id)
             if not tbd_url:
-                self.logger.info("Frontier is empty. Stopping Crawler.")
+                self.logger.info("TaskBoard signaled completion. Stopping Worker.")
                 break
             resp = download(tbd_url, self.config, self.logger)
             self.logger.info(
@@ -30,8 +35,5 @@ class PoliteWorker(Thread):
                 f"using cache {self.config.cache_server}.")
             scraped_urls = scraper.scraper(tbd_url, resp)
             for scraped_url in scraped_urls:
-                self.frontier.add_url(scraped_url)
-            self.frontier.mark_url_complete(tbd_url)
-            """Do not add an extra fixed sleep here; per-domain politeness is enforced
-            inside the Frontier. If you still want a global per-iteration backoff,
-            set it via config.time_delay, but be aware it will reduce throughput."""
+                self.taskboard.add_url(scraped_url)
+            self.taskboard.mark_url_complete(tbd_url)
