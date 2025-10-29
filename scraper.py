@@ -8,7 +8,8 @@ from utils.utilities import (
     persist_meta, update_domain_health, StatsCollector,
     MIN_WORDS, MIN_TEXT_RATIO, MAX_BYTES_HEADER,
     MAX_BYTES_BODY, SAVE_BYTES_CAP, looks_like_trap_url,
-    domain_is_downgraded
+    domain_is_downgraded, is_allowed_by_robots,
+    get_sitemap_urls, parse_sitemap_xml, is_sitemap_url
 )
 
 
@@ -60,27 +61,73 @@ def extract_next_links(url, resp):
         persist_meta(url, now, resp, breakers + ["too_large_body"], links_out=0)
         return []
 
-    # Visible text extraction and info value evaluation
-    text = extract_visible_text(content, getattr(rr, "encoding", None))
-    words = tokenize_words(text)
-    word_count = len(words)
-    text_ratio = (len(text) / max(1, len(content)))  # visible text number / original content size
-    low_info = (word_count < MIN_WORDS) or (text_ratio < MIN_TEXT_RATIO)
+    # Handle sitemap files specially
+    if is_sitemap_url(url):
+        try:
+            sitemap_urls, sitemap_indexes = parse_sitemap_xml(content)
+            
+            # Combine all URLs from sitemap and any nested sitemaps
+            all_sitemap_links = sitemap_urls + sitemap_indexes
+            candidates = normalize_and_defragment_all(all_sitemap_links, base=url)
+            
+            # For sitemap files, treat as informative content
+            word_count = len(sitemap_urls) + len(sitemap_indexes)  # Count of URLs as "words"
+            text_ratio = 1.0  # Always consider sitemaps as having good content ratio
+            low_info = False
+            
+            # Save sitemap content if not too large
+            bytes_saved = 0
+            if len(content) <= SAVE_BYTES_CAP:
+                bytes_saved = save_page_content(url, content)
+            
+            # Record for stats (use URL count as word count)
+            try:
+                fake_words = [f"sitemap_url_{i}" for i in range(word_count)]
+                StatsCollector.record_page(url, fake_words)
+            except Exception:
+                pass
+                
+        except Exception:
+            # If sitemap parsing fails, treat as regular content
+            text = extract_visible_text(content, getattr(rr, "encoding", None))
+            words = tokenize_words(text)
+            word_count = len(words)
+            text_ratio = (len(text) / max(1, len(content)))
+            low_info = (word_count < MIN_WORDS) or (text_ratio < MIN_TEXT_RATIO)
+            
+            try:
+                StatsCollector.record_page(url, words)
+            except Exception:
+                pass
+                
+            bytes_saved = 0
+            if not low_info and len(content) <= SAVE_BYTES_CAP:
+                bytes_saved = save_page_content(url, content)
+                
+            raw_links = extract_links(content)
+            candidates = normalize_and_defragment_all(raw_links, base=url)
+    else:
+        # Regular HTML processing
+        text = extract_visible_text(content, getattr(rr, "encoding", None))
+        words = tokenize_words(text)
+        word_count = len(words)
+        text_ratio = (len(text) / max(1, len(content)))  # visible text number / original content size
+        low_info = (word_count < MIN_WORDS) or (text_ratio < MIN_TEXT_RATIO)
 
-    # Record stats and write report synchronously (worker thread writes report)
-    try:
-        StatsCollector.record_page(url, words)
-    except Exception:
-        pass
+        # Record stats and write report synchronously (worker thread writes report)
+        try:
+            StatsCollector.record_page(url, words)
+        except Exception:
+            pass
 
-    # Save content only when small and informative HTML
-    bytes_saved = 0
-    if not low_info and len(content) <= SAVE_BYTES_CAP:
-        bytes_saved = save_page_content(url, content)
+        # Save content only when small and informative HTML
+        bytes_saved = 0
+        if not low_info and len(content) <= SAVE_BYTES_CAP:
+            bytes_saved = save_page_content(url, content)
 
-    # Extract links and normalize (no is_valid here; only trap and dedupe)
-    raw_links = extract_links(content)
-    candidates = normalize_and_defragment_all(raw_links, base=url)
+        # Extract links and normalize (no is_valid here; only trap and dedupe)
+        raw_links = extract_links(content)
+        candidates = normalize_and_defragment_all(raw_links, base=url)
 
     # Core: link extractor
     seen = set()
@@ -92,6 +139,17 @@ def extract_next_links(url, resp):
         if looks_like_trap_url(u):
             continue
         out_links.append(u)
+
+    # Add sitemap URLs to discovery (only if not processing a sitemap already)
+    if not is_sitemap_url(url):
+        try:
+            sitemap_urls = get_sitemap_urls(url)
+            for sitemap_url in sitemap_urls:
+                if sitemap_url not in seen and not looks_like_trap_url(sitemap_url):
+                    seen.add(sitemap_url)
+                    out_links.append(sitemap_url)
+        except Exception:
+            pass  # If sitemap discovery fails, continue with regular links
 
     # Suppress expansions on low-info pages or downgraded domains
     if low_info or domain_is_downgraded(url):
@@ -137,6 +195,10 @@ def is_valid(url):
         ):
             return False
 
+        # Allow sitemap XML files even though they have .xml extension
+        if is_sitemap_url(url):
+            return True
+
         # Filter out URLs with undesirable file extensions
         if re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
@@ -146,13 +208,17 @@ def is_valid(url):
             + r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
             + r"|epub|dll|cnf|tgz|sha1"
             + r"|thmx|mso|arff|rtf|jar|csv"
-            + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$",
+            + r"|rm|smil|wmv|swf|wma|zip|rar|gz|xml)$",
             parsed.path.lower()):
             return False
 
         
         # Trap detection on current URL     
         if looks_like_trap_url(url):
+            return False
+
+        # Check robots.txt rules
+        if not is_allowed_by_robots(url):
             return False
 
         return True

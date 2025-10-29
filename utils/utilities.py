@@ -6,8 +6,16 @@ import threading
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse, urlunparse, urljoin, parse_qs
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from collections import Counter, defaultdict
+try:
+    from urllib.robotparser import RobotFileParser
+except ImportError:
+    RobotFileParser = None
+try:
+    import xml.etree.ElementTree as ET
+except ImportError:
+    ET = None
  
 
 try:
@@ -48,6 +56,231 @@ os.makedirs(PAGES_DIR, exist_ok=True)
 os.makedirs(META_DIR, exist_ok=True)
 os.makedirs(REPORT_DIR, exist_ok=True)
 
+
+
+# Robots.txt support
+class RobotsChecker:
+    """Thread-safe robots.txt checker with per-domain caching and sitemap discovery."""
+    
+    def __init__(self, user_agent: str = "*"):
+        self._lock = threading.RLock()
+        self._robots_cache: Dict[str, Optional[object]] = {}
+        self._crawl_delays: Dict[str, float] = {}
+        self._sitemaps: Dict[str, List[str]] = {}  # domain -> list of sitemap URLs
+        self._user_agent = user_agent
+        self._min_delay = 0.5  # Project minimum: 500ms
+    
+    def _get_robots_url(self, url: str) -> str:
+        """Get robots.txt URL for a given URL."""
+        try:
+            p = urlparse(url)
+            return f"{p.scheme}://{p.netloc}/robots.txt"
+        except Exception:
+            return ""
+    
+    def _fetch_robots(self, domain: str, robots_url: str) -> Optional[object]:
+        """Fetch and parse robots.txt for a domain and extract sitemaps."""
+        if RobotFileParser is None:
+            return None
+        
+        try:
+            rp = RobotFileParser()
+            rp.set_url(robots_url)
+            rp.read()
+            
+            # Extract crawl-delay for our user agent
+            delay = rp.crawl_delay(self._user_agent)
+            if delay is None:
+                delay = rp.crawl_delay("*")
+            
+            # Enforce minimum delay
+            if delay is not None:
+                delay = max(self._min_delay, float(delay))
+            else:
+                delay = self._min_delay
+            
+            self._crawl_delays[domain] = delay
+            
+            # Extract sitemap URLs from robots.txt
+            sitemaps = []
+            if hasattr(rp, 'site_maps') and rp.site_maps():
+                sitemaps = list(rp.site_maps())
+            
+            self._sitemaps[domain] = sitemaps
+            return rp
+            
+        except Exception:
+            # If robots.txt fetch fails, assume permissive
+            self._crawl_delays[domain] = self._min_delay
+            self._sitemaps[domain] = []
+            return None
+    
+    def get_crawl_delay(self, url: str) -> float:
+        """Get crawl delay for a domain, respecting robots.txt but enforcing minimum."""
+        try:
+            domain = urlparse(url).netloc.lower()
+            if not domain:
+                return self._min_delay
+            
+            with self._lock:
+                if domain not in self._robots_cache:
+                    robots_url = self._get_robots_url(url)
+                    self._robots_cache[domain] = self._fetch_robots(domain, robots_url)
+                
+                return self._crawl_delays.get(domain, self._min_delay)
+        except Exception:
+            return self._min_delay
+    
+    def can_fetch(self, url: str) -> bool:
+        """Check if URL can be fetched according to robots.txt."""
+        try:
+            domain = urlparse(url).netloc.lower()
+            if not domain:
+                return True
+            
+            with self._lock:
+                if domain not in self._robots_cache:
+                    robots_url = self._get_robots_url(url)
+                    self._robots_cache[domain] = self._fetch_robots(domain, robots_url)
+                
+                rp = self._robots_cache[domain]
+                if rp is None:
+                    return True  # If no robots.txt or parsing failed, allow
+                
+                return rp.can_fetch(self._user_agent, url)
+        except Exception:
+            return True  # Default to allowing if check fails
+
+    def get_sitemaps(self, url: str) -> List[str]:
+        """Get sitemap URLs for a domain from robots.txt and common locations."""
+        try:
+            domain = urlparse(url).netloc.lower()
+            if not domain:
+                return []
+            
+            with self._lock:
+                # Ensure robots.txt is fetched
+                if domain not in self._robots_cache:
+                    robots_url = self._get_robots_url(url)
+                    self._robots_cache[domain] = self._fetch_robots(domain, robots_url)
+                
+                # Get sitemaps from robots.txt
+                declared_sitemaps = self._sitemaps.get(domain, [])
+                
+                # Add common sitemap locations for forced checking
+                base_url = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+                common_sitemaps = [
+                    f"{base_url}/sitemap.xml",
+                    f"{base_url}/sitemap_index.xml",
+                    f"{base_url}/sitemaps.xml",
+                    f"{base_url}/sitemap/sitemap.xml"
+                ]
+                
+                # Combine declared and common sitemaps, remove duplicates
+                all_sitemaps = list(dict.fromkeys(declared_sitemaps + common_sitemaps))
+                return all_sitemaps
+                
+        except Exception:
+            return []
+
+
+# Global robots checker instance
+_robots_checker: Optional[RobotsChecker] = None
+_robots_init_lock = threading.Lock()
+
+
+def get_robots_checker(user_agent: str = "*") -> RobotsChecker:
+    """Get or create global robots checker instance."""
+    global _robots_checker
+    with _robots_init_lock:
+        if _robots_checker is None:
+            _robots_checker = RobotsChecker(user_agent)
+        return _robots_checker
+
+
+def is_allowed_by_robots(url: str, user_agent: str = "*") -> bool:
+    """Check if URL is allowed by robots.txt."""
+    checker = get_robots_checker(user_agent)
+    return checker.can_fetch(url)
+
+
+def get_robots_delay(url: str, user_agent: str = "*") -> float:
+    """Get robots.txt crawl delay for URL (minimum 500ms enforced)."""
+    checker = get_robots_checker(user_agent)
+    return checker.get_crawl_delay(url)
+
+
+def get_sitemap_urls(url: str, user_agent: str = "*") -> List[str]:
+    """Get sitemap URLs for a domain from robots.txt and common locations."""
+    checker = get_robots_checker(user_agent)
+    return checker.get_sitemaps(url)
+
+
+# Sitemap parsing functions
+
+def parse_sitemap_xml(content: bytes) -> Tuple[List[str], List[str]]:
+    """
+    Parse sitemap XML content and return (urls, sitemap_indexes).
+    
+    Returns:
+        urls: List of regular URLs found in <url><loc> elements
+        sitemap_indexes: List of sitemap URLs found in <sitemap><loc> elements
+    """
+    if ET is None:
+        return [], []
+    
+    try:
+        root = ET.fromstring(content)
+        urls = []
+        sitemap_indexes = []
+        
+        # Handle namespace prefixes
+        namespaces = {
+            'sm': 'http://www.sitemaps.org/schemas/sitemap/0.9',
+            '': 'http://www.sitemaps.org/schemas/sitemap/0.9'
+        }
+        
+        # Extract regular URLs from <url><loc> elements
+        for url_elem in root.findall('.//url', namespaces):
+            loc_elem = url_elem.find('loc', namespaces)
+            if loc_elem is not None and loc_elem.text:
+                urls.append(loc_elem.text.strip())
+        
+        # Also try without namespace for compatibility
+        if not urls:
+            for url_elem in root.findall('.//url'):
+                loc_elem = url_elem.find('loc')
+                if loc_elem is not None and loc_elem.text:
+                    urls.append(loc_elem.text.strip())
+        
+        # Extract sitemap index URLs from <sitemap><loc> elements
+        for sitemap_elem in root.findall('.//sitemap', namespaces):
+            loc_elem = sitemap_elem.find('loc', namespaces)
+            if loc_elem is not None and loc_elem.text:
+                sitemap_indexes.append(loc_elem.text.strip())
+        
+        # Also try without namespace for compatibility
+        if not sitemap_indexes:
+            for sitemap_elem in root.findall('.//sitemap'):
+                loc_elem = sitemap_elem.find('loc')
+                if loc_elem is not None and loc_elem.text:
+                    sitemap_indexes.append(loc_elem.text.strip())
+        
+        return urls, sitemap_indexes
+        
+    except Exception:
+        # If XML parsing fails, return empty lists
+        return [], []
+
+
+def is_sitemap_url(url: str) -> bool:
+    """Check if URL appears to be a sitemap file."""
+    try:
+        path = urlparse(url).path.lower()
+        return (path.endswith('.xml') and 
+                ('sitemap' in path or 'urlset' in path))
+    except Exception:
+        return False
 
 
 # Utilities

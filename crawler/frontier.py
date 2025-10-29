@@ -8,6 +8,7 @@ import time
 from urllib.parse import urlparse
 
 from utils import get_logger, get_urlhash, normalize
+from utils.utilities import get_robots_delay
 from scraper import is_valid
 
 class Frontier(object):
@@ -20,6 +21,7 @@ class Frontier(object):
         self._cv = Condition(self._lock)
 
         # politeness per domain: at least 0.5s between requests to the same domain
+        # Note: robots.txt delays will be checked per-URL and override this if higher
         self.domain_delay = max(0.5, float(getattr(self.config, "time_delay", 0.0)))
 
         # per-domain queues and next-allowed times
@@ -107,8 +109,13 @@ class Frontier(object):
                 # Found a domain ready to go.
                 url = self._queues[chosen_dom].popleft()
                 self._pending -= 1
+                
+                # Get robots.txt delay for this URL, enforce minimum 500ms
+                robots_delay = get_robots_delay(url, getattr(self.config, "user_agent", "*"))
+                actual_delay = max(self.domain_delay, robots_delay)
+                
                 # Update next allowed time for this domain
-                self._next_allowed[chosen_dom] = now + self.domain_delay
+                self._next_allowed[chosen_dom] = now + actual_delay
                 return url
             
 
