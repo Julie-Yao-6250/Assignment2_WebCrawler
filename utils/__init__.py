@@ -5,9 +5,10 @@ from urllib.parse import urlparse
 
 def get_logger(name, filename=None):
     logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     if not os.path.exists("Logs"):
         os.makedirs("Logs")
+    print(f"Creating log file in: {os.path.abspath('Logs')}")
     fh = logging.FileHandler(f"Logs/{filename if filename else name}.log")
     fh.setLevel(logging.DEBUG)
     ch = logging.StreamHandler()
