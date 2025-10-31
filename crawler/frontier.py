@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlparse
 
 from utils import get_logger, get_urlhash, normalize
-from utils.utilities import get_robots_delay
+from utils.utilities import get_robots_delay, is_allowed_by_robots, domain_is_downgraded
 from scraper import is_valid
 
 class Frontier(object):
@@ -113,16 +113,20 @@ class Frontier(object):
                 # Get robots.txt delay for this URL, enforce minimum 500ms
                 robots_delay = get_robots_delay(url, getattr(self.config, "user_agent", "*"))
                 actual_delay = max(self.domain_delay, robots_delay)
+                if domain_is_downgraded(url):
+                    actual_delay *= 5.0
                 
                 # Update next allowed time for this domain
                 self._next_allowed[chosen_dom] = now + actual_delay
                 return url
-            
 
     def add_url(self, url):
         url = normalize(url)
         urlhash = get_urlhash(url)
         with self._lock:
+            # robots allow before persisting
+            if not is_allowed_by_robots(url, getattr(self.config, "user_agent", "*")):
+                return
             if urlhash not in self.save:
                 self.save[urlhash] = (url, False)
                 self.save.sync()

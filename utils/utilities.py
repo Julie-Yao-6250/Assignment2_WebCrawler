@@ -40,6 +40,9 @@ REPEAT_SEGMENTS_MAX = 3
 
 DOMAIN_DOWNGRADE_THRESHOLD = 5            # Continuous breaker count to downgrade
 
+DIFF_KEYS = {"do"}      # do=diff
+REV_KEYS  = {"rev"}     # any rev=*
+
 DATA_DIR = os.path.join("data")
 PAGES_DIR = os.path.join(DATA_DIR, "pages")
 META_DIR = os.path.join(DATA_DIR, "meta")
@@ -464,24 +467,31 @@ def _has_suspicious_pagination(p) -> bool:
 
 
 def looks_like_trap_url(u: str) -> bool:
-	try:
-		if not u or len(u) > URL_MAX_LEN:
-			return True
-		p = urlparse(u)
-		qs = parse_qs(p.query, keep_blank_values=True)
-		if len(qs) > MAX_QUERY_PARAMS:
-			return True
-		if any(k in qs for k in SESSION_KEYS):
-			return True
-		if _has_calendar_pattern(p):
-			return True
-		if _has_suspicious_pagination(p):
-			return True
-		if _has_repeated_segments(p.path or ""):
-			return True
-		return False
-	except Exception:
-		return True
+    try:
+        if not u or len(u) > URL_MAX_LEN:
+            return True
+        p = urlparse(u)
+        qs = parse_qs(p.query, keep_blank_values=True)
+
+        # explicit doku.php diff/rev pattern
+        if any(k in qs for k in REV_KEYS):
+            return True
+        if "do" in qs and any(v.lower() == "diff" for v in qs.get("do", [])):
+            return True
+
+        if len(qs) > MAX_QUERY_PARAMS:
+            return True
+        if any(k in qs for k in SESSION_KEYS):
+            return True
+        if _has_calendar_pattern(p):
+            return True
+        if _has_suspicious_pagination(p):
+            return True
+        if _has_repeated_segments(p.path or ""):
+            return True
+        return False
+    except Exception:
+        return True
 
 
 
@@ -578,17 +588,19 @@ def _domain_of(url: str) -> str:
 
 
 def update_domain_health(url: str, breakers: List[str]):
-	dom = _domain_of(url)
-	if not dom:
-		return
-	# Count only significant breakers
-	significant = {"too_large_header", "too_large_body", "empty_200", "trap_url", "non_html", "low_info"}
-	bad = any(b in significant for b in (breakers or []))
-	if bad:
-		_domain_bad_counts[dom] = _domain_bad_counts.get(dom, 0) + 1
-	else:
-		# decay
-		_domain_bad_counts[dom] = max(0, _domain_bad_counts.get(dom, 0) - 1)
+    dom = _domain_of(url)
+    if not dom:
+        return
+    significant = {
+        "too_large_header", "too_large_body", "empty_200",
+        "trap_url", "non_html", "low_info",
+        "http_4xx", "http_403"
+    }
+    bad = any(b in significant for b in (breakers or []))
+    if bad:
+        _domain_bad_counts[dom] = _domain_bad_counts.get(dom, 0) + 1
+    else:
+        _domain_bad_counts[dom] = max(0, _domain_bad_counts.get(dom, 0) - 1)
 
 
 def domain_is_downgraded(url: str) -> bool:

@@ -14,8 +14,20 @@ from utils.utilities import (
 
 
 def scraper(url, resp):
-    links = extract_next_links(url, resp)
-    return [link for link in links if is_valid(link)]
+    now = utcnow_iso()
+    breakers = []
+
+    # Non-200 or no response
+    if resp is None or getattr(resp, "status", None) != 200 or getattr(resp, "raw_response", None) is None:
+        status = getattr(resp, "status", None)
+        if isinstance(status, int) and 400 <= status < 500:
+            breakers += ["http_4xx"]
+            if status == 403:
+                breakers += ["http_403"]
+        breakers.append("bad_status_or_no_response")
+        persist_meta(url, now, resp, breakers, links_out=0)
+        update_domain_health(url, breakers)
+        return []
 
 
 def extract_next_links(url, resp):
@@ -33,9 +45,26 @@ def extract_next_links(url, resp):
     now = utcnow_iso()
     breakers = []
 
-    # Health checks and size-based circuit breakers
-    if resp is None or getattr(resp, "status", None) != 200 or getattr(resp, "raw_response", None) is None:
-        persist_meta(url, now, resp, breakers + ["bad_status_or_no_response"], links_out=0)
+    # If no response or non-200, persist AND update health before returning
+    if resp is None or getattr(resp, "raw_response", None) is None:
+        breakers.append("bad_status_or_no_response")
+        persist_meta(url, now, resp, breakers, links_out = 0)
+        update_domain_health(url, breakers)
+        return []
+
+    status = getattr(resp, "status", None)
+    if status != 200:
+        # tag client vs server issues for smarter backoff elsewhere
+        if isinstance(status, int):
+            if 400 <= status < 500:
+                breakers += ["http_4xx"]
+                if status == 403:
+                    breakers += ["http_403"]
+            elif status >= 500:
+                breakers += ["http_5xx"]
+        breakers.append("bad_status")
+        persist_meta(url, now, resp, breakers, links_out = 0)
+        update_domain_health(url, breakers)
         return []
 
     rr = resp.raw_response
@@ -43,22 +72,30 @@ def extract_next_links(url, resp):
     ctype = headers.get("Content-Type")
     clen = safe_int(headers.get("Content-Length"))
 
-    # Temporary filter
+    # non-HTML, oversize, or empty responses already persisted. Also update health.
     if not is_html(ctype or ""):
-        persist_meta(url, now, resp, breakers + ["non_html"], links_out=0)
+        breakers = ["non_html"]
+        persist_meta(url, now, resp, breakers, links_out = 0)
+        update_domain_health(url, breakers)
         return []
 
-    if clen and clen > MAX_BYTES_HEADER:  # Filter out header over 48KB
-        persist_meta(url, now, resp, breakers + ["too_large_header"], links_out=0)
+    if clen and clen > MAX_BYTES_HEADER:
+        breakers = ["too_large_header"]
+        persist_meta(url, now, resp, breakers, links_out = 0)
+        update_domain_health(url, breakers)
         return []
 
     content = getattr(rr, "content", b"") or b""
-    if len(content) == 0:                 # Filter out empty web
-        persist_meta(url, now, resp, breakers + ["empty_200"], links_out=0)
+    if len(content) == 0:
+        breakers = ["empty_200"]
+        persist_meta(url, now, resp, breakers, links_out = 0)
+        update_domain_health(url, breakers)
         return []
 
-    if len(content) > MAX_BYTES_BODY:     # Filter out body over 10M
-        persist_meta(url, now, resp, breakers + ["too_large_body"], links_out=0)
+    if len(content) > MAX_BYTES_BODY:
+        breakers = ["too_large_body"]
+        persist_meta(url, now, resp, breakers, links_out = 0)
+        update_domain_health(url, breakers)
         return []
 
     # Handle sitemap files specially
@@ -136,7 +173,8 @@ def extract_next_links(url, resp):
         if u in seen:
             continue
         seen.add(u)
-        if looks_like_trap_url(u):
+        # single gate covers scope, robots, traps
+        if not is_valid(u):
             continue
         out_links.append(u)
 

@@ -24,6 +24,15 @@ class Worker(Thread):
                 self.logger.info("Frontier is empty. Stopping Crawler.")
                 break
             resp = download(tbd_url, self.config, self.logger)
+            status = getattr(resp, "status", None)
+            if isinstance(status, int) and 400 <= status < 500:
+                # optionally tag domain health too
+                from utils.utilities import update_domain_health, utcnow_iso, persist_meta
+                breakers = ["http_4xx"] + (["http_403"] if status == 403 else [])
+                persist_meta(tbd_url, utcnow_iso(), resp, breakers, links_out = 0)
+                update_domain_health(tbd_url, breakers)
+                self.frontier.mark_url_complete(tbd_url)
+                continue
             self.logger.info(
                 f"Downloaded {tbd_url}, status <{resp.status}>, "
                 f"using cache {self.config.cache_server}.")
