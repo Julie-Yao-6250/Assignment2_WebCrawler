@@ -1,7 +1,7 @@
 import re
 from urllib.parse import urlparse
 
-from utilities import (
+from utils.utilities import (
     utcnow_iso, safe_int, is_html,
     extract_visible_text, tokenize_words, extract_links,
     normalize_and_defragment_all, save_page_content,
@@ -58,11 +58,6 @@ def extract_next_links(url, resp):
 
     if len(content) > MAX_BYTES_BODY:     # Filter out body over 10M
         persist_meta(url, now, resp, breakers + ["too_large_body"], links_out=0)
-        return []
-
-    # Trap detection on current URL
-    if looks_like_trap_url(url):          # Filter out url > 1024, query > 8, session, calandar, pagination, repeated
-        persist_meta(url, now, resp, breakers + ["trap_url"], links_out=0)
         return []
 
     # Visible text extraction and info value evaluation
@@ -127,6 +122,7 @@ def is_valid(url):
     # Decide whether to crawl this url or not. 
     # If you decide to crawl it, return True; otherwise return False.
     # There are already some conditions that return False.
+    # Policy: http/https; allowed UCI domains; block known non-HTML types; trap heuristics.
     try:
         parsed = urlparse(url)
         if parsed.scheme not in set(["http", "https"]):
@@ -141,7 +137,7 @@ def is_valid(url):
         ):
             return False
 
-        path = (parsed.path or "").lower()
+        # Filter out URLs with undesirable file extensions
         if re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
             + r"|png|tiff?|mid|mp2|mp3|mp4"
@@ -154,6 +150,8 @@ def is_valid(url):
             parsed.path.lower()):
             return False
 
+        
+        # Trap detection on current URL     
         if looks_like_trap_url(url):
             return False
 
