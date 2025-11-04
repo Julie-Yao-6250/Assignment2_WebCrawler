@@ -196,6 +196,38 @@ def is_valid(url):
         if not any(host == d or host.endswith("." + d) for d in allowed):
             return False
 
+        # Hard-coded trap filtering for known problematic hosts/paths
+        # Filter suspicious hosts
+        trap_hosts = {
+            "wics.ics.uci.edu",
+            "ngs.ics.uci.edu", 
+            "gitlab.ics.uci.edu",  # Every commit for every repository is a separate page
+            "grape.ics.uci.edu"
+        }
+        if host in trap_hosts:
+            return False
+        
+        # Filter hosts/paths containing specific patterns
+        if "ical" in host or "tribe" in host:
+            return False
+            
+        # Filter specific path patterns
+        if "/events/" in path:  # Filter /events/ (plural) but not /event/ (singular)
+            return False
+            
+        if "~eppstein/pix" in path:
+            return False
+            
+        if "doku.php" in path:
+            return False
+            
+        # Filter specific URL patterns
+        if "isg.ics.uci.edu/events/" in url.lower():
+            return False
+            
+        if "fano.ics.uci.edu/ca/rules/" in url.lower():
+            return False
+
         # Filter out URLs with undesirable file extensions
         if re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
