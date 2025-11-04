@@ -9,7 +9,8 @@ from utils.utilities import (
     MIN_WORDS, MIN_TEXT_RATIO, MAX_BYTES_HEADER,
     MAX_BYTES_BODY, SAVE_BYTES_CAP, looks_like_trap_url,
     domain_is_downgraded, is_allowed_by_robots,
-    get_sitemap_urls, parse_sitemap_xml, is_sitemap_url
+    get_sitemap_urls, parse_sitemap_xml, is_sitemap_url,
+    blocked_by_manual
 )
 
 
@@ -183,21 +184,17 @@ def is_valid(url):
     # Policy: http/https; allowed UCI domains; block known non-HTML types; trap heuristics.
     try:
         parsed = urlparse(url)
-        if parsed.scheme not in set(["http", "https"]):
+        if parsed.scheme not in {"http", "https"}:
             return False
 
         host = (parsed.hostname or "").lower()
-        if not (
-                host.endswith(".ics.uci.edu") or host == "ics.uci.edu" or
-                host.endswith(".cs.uci.edu") or host == "cs.uci.edu" or
-                host.endswith(".informatics.uci.edu") or host == "informatics.uci.edu" or
-                host.endswith(".stat.uci.edu") or host == "stat.uci.edu"
-        ):
-            return False
+        path = (parsed.path or "").lower()
+        query = (parsed.query or "").lower()
 
-        # Allow sitemap XML files even though they have .xml extension
-        if is_sitemap_url(url):
-            return True
+        # Allowed UCI domains only
+        allowed = {"ics.uci.edu", "cs.uci.edu", "informatics.uci.edu", "stat.uci.edu"}
+        if not any(host == d or host.endswith("." + d) for d in allowed):
+            return False
 
         # Filter out URLs with undesirable file extensions
         if re.match(
@@ -208,12 +205,20 @@ def is_valid(url):
             + r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
             + r"|epub|dll|cnf|tgz|sha1"
             + r"|thmx|mso|arff|rtf|jar|csv"
-            + r"|rm|smil|wmv|swf|wma|zip|rar|gz|xml)$",
+            + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$",
             parsed.path.lower()):
             return False
 
-        
-        # Trap detection on current URL     
+        # Block non-HTML and downloads (keep .ics here too)
+        if re.search(
+            r"\.(?:css|js|bmp|gif|jpe?g|ico|png|tiff?|mid|mp2|mp3|mp4|wav|avi|mov|mpeg|ram|m4v|mkv|ogg|ogv|pdf"
+            r"|ps|eps|tex|ppt|pptx|doc|docx|xls|xlsx|names|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
+            r"|epub|dll|cnf|tgz|sha1|thmx|mso|arff|rtf|jar|csv|rm|smil|wmv|swf|wma|zip|rar|gz|ics)$",
+            path
+        ):
+            return False
+
+        # Heuristics last
         if looks_like_trap_url(url):
             return False
 
@@ -222,7 +227,5 @@ def is_valid(url):
             return False
 
         return True
-
-    except TypeError:
-        print ("TypeError for ", parsed)
-        raise
+    except Exception:
+        return False

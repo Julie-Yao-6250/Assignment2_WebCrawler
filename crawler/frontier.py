@@ -121,6 +121,8 @@ class Frontier(object):
 
     def add_url(self, url):
         url = normalize(url)
+        if not is_valid(url):
+            return
         urlhash = get_urlhash(url)
         with self._lock:
             if urlhash not in self.save:
