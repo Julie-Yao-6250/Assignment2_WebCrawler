@@ -244,8 +244,50 @@ def looks_like_trap_url(u: str) -> bool:
 		return False
 	except Exception:
 		return True
+	
+# Precompiled contains-anywhere patterns
+# Notes:
+# - /events/ blocks plural ONLY. Singular /event/ still allowed.
+# - /~eppstein/pix/ must be under any *.ics.uci.edu host.
+# - /ca/rules/ blocks anywhere in path.
+# - wiki/swiki doku.php blocks wherever it appears.
+# - grape: block history/diff/version enumerations that explode the frontier.
+_MANUAL_TRAPS = [
+    # ics.uci.edu/~eppstein/pix anywhere under the ics.uci.edu tree
+    ("eppstein_pix", lambda u, h, p, q: h.endswith("ics.uci.edu") and "/~eppstein/pix/" in p),
 
+    # ANY host: /events/ anywhere in path (do NOT block singular /event/)
+    ("events_plural", lambda u, h, p, q: "/events/" in p),
 
+    # ANY host: /ca/rules/ anywhere
+    ("ca_rules", lambda u, h, p, q: "/ca/rules/" in p),
+
+    # wiki and swiki doku.php anywhere in path or query
+    ("doku_php", lambda u, h, p, q: h in {"wiki.ics.uci.edu", "swiki.ics.uci.edu"} and ("doku.php" in p or "doku.php" in q)),
+
+    # block the whole grape host (and any subdomains if any)
+    ("grape_host", lambda u, h, p, q: h == "grape.ics.uci.edu" or h.endswith(".grape.ics.uci.edu")),
+
+    # Common calendar feeds
+    ("calendar_ical",  lambda u, h, p, q: "ical"  in p or "ical"  in q),
+    ("calendar_tribe", lambda u, h, p, q: "tribe" in p or "tribe" in q),
+
+    # GitLab per-commit explosion (host-level trap still valid)
+    ("gitlab_host",    lambda u, h, p, q: h == "gitlab.ics.uci.edu"),
+]
+
+def blocked_by_manual(url: str) -> str | None:
+    try:
+        parsed = urlparse(url)
+        h = (parsed.hostname or "").lower()
+        p = (parsed.path or "").lower()
+        q = (parsed.query or "").lower()
+        for name, rule in _MANUAL_TRAPS:
+            if rule(url, h, p, q):
+                return name
+    except Exception:
+        pass
+    return None
 
 # Persistence
 
